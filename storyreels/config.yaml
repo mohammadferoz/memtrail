@@ -1,0 +1,26 @@
+video:
+  width: 1080
+  height: 1920
+  fps: 30
+  margin: 48
+  font: DejaVuSans-Bold
+  bg_color: "#0e0e10"
+  text_color: "#ffffff"
+  caption_bg: "#000000A0"
+  accent_color: "#FFD54F"
+  max_duration: 45
+  min_duration: 20
+  music_db: -22
+  voice_db: -6
+
+story:
+  target_scenes: 8
+  max_words_per_scene: 30
+  hook_max_chars: 90
+
+images:
+  size: "1024x1024"
+  style_hint: "cute 2D cartoon, bold outlines, vibrant colors, soft shading"
+
+hashtags:
+  base: ["#story", "#cartoon", "#reels", "#animation", "#viral"]
