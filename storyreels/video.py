@@ -1,0 +1,178 @@
+import os
+import random
+from typing import List, Optional, Tuple
+from dataclasses import dataclass
+
+import numpy as np
+from PIL import Image, ImageDraw, ImageFont
+from moviepy.editor import (
+    AudioFileClip,
+    ColorClip,
+    CompositeAudioClip,
+    CompositeVideoClip,
+    ImageClip,
+    concatenate_videoclips,
+)
+
+# Pillow >=10 removed Image.ANTIALIAS; alias to LANCZOS for moviepy compatibility
+if not hasattr(Image, "ANTIALIAS"):
+    Image.ANTIALIAS = Image.Resampling.LANCZOS  # type: ignore
+
+from .utils import (
+    ease_in_out,
+    lerp,
+    choose_ken_burns_params,
+    split_text_for_caption,
+)
+
+
+@dataclass
+class SceneSpec:
+    image_path: str
+    text: str
+    duration: float
+
+
+def _write_bg_tone_wav(tmp_path: str, duration: float, sample_rate: int = 44100, freq: float = 220.0, amplitude: float = 0.08) -> None:
+    import wave
+    import struct
+    num_frames = int(sample_rate * duration)
+    with wave.open(tmp_path, 'w') as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(sample_rate)
+        for n in range(num_frames):
+            t = n / sample_rate
+            sample = int(amplitude * np.sin(2 * np.pi * freq * t) * 32767)
+            wf.writeframes(struct.pack('<h', sample))
+
+
+def _make_bg_tone(duration: float, volume_db: float = -22.0) -> Optional[AudioFileClip]:
+    if duration <= 0:
+        return None
+    tmp_path = os.path.join(os.getcwd(), f"_tone_{abs(hash((duration, volume_db)))}.wav")
+    try:
+        _write_bg_tone_wav(tmp_path, duration)
+        clip = AudioFileClip(tmp_path).volumex(10 ** (volume_db / 20.0))
+        return clip
+    except Exception:
+        return None
+
+
+def _ken_burns_clip(image_path: str, w: int, h: int, duration: float, rng: random.Random) -> ImageClip:
+    img = Image.open(image_path).convert("RGB")
+    base = ImageClip(np.array(img))
+
+    (s_s, sx, sy), (s_e, ex, ey) = choose_ken_burns_params(rng)
+
+    def fl(get_frame, t):
+        progress = ease_in_out(min(max(t / duration, 0.0), 1.0))
+        scale = lerp(s_s, s_e, progress)
+        dx = lerp(sx, ex, progress)
+        dy = lerp(sy, ey, progress)
+        frame = get_frame(t)
+        clip = ImageClip(frame).resize(scale)
+        fw, fh = clip.size
+        cx = int((fw - w) * (dx * 0.5 + 0.5))
+        cy = int((fh - h) * (dy * 0.5 + 0.5))
+        x1 = max(0, min(fw - w, cx))
+        y1 = max(0, min(fh - h, cy))
+        return clip.crop(x1=x1, y1=y1, x2=x1 + w, y2=y1 + h).get_frame(0)
+
+    return base.fl(fl, apply_to=["mask"]).set_duration(duration)
+
+
+def _render_caption_image(text: str, w: int, margin: int, text_color: Tuple[int, int, int]) -> Image.Image:
+    try:
+        font = ImageFont.truetype("DejaVuSans-Bold.ttf", 54)
+    except Exception:
+        font = ImageFont.load_default()
+    lines = split_text_for_caption(text, max_chars=58)
+    height = len(lines) * 64 + 32
+    img = Image.new("RGBA", (w, height), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+    y = 16
+    for ln in lines:
+        ln_width = int(draw.textlength(ln, font=font))
+        x = (w - ln_width) // 2
+        draw.text((x+2, y+2), ln, font=font, fill=(0,0,0,200))
+        draw.text((x-2, y+2), ln, font=font, fill=(0,0,0,200))
+        draw.text((x+2, y-2), ln, font=font, fill=(0,0,0,200))
+        draw.text((x-2, y-2), ln, font=font, fill=(0,0,0,200))
+        draw.text((x, y), ln, font=font, fill=text_color + (255,))
+        y += 64
+    return img
+
+
+def _caption_clip(text: str, w: int, h: int, margin: int, text_color_hex: str, caption_bg_hex: str) -> CompositeVideoClip:
+    def hex_to_rgba(hexstr: str) -> Tuple[int, int, int, int]:
+        hexstr = hexstr.lstrip('#')
+        if len(hexstr) == 8:
+            r = int(hexstr[0:2], 16)
+            g = int(hexstr[2:4], 16)
+            b = int(hexstr[4:6], 16)
+            a = int(hexstr[6:8], 16)
+        else:
+            r = int(hexstr[0:2], 16)
+            g = int(hexstr[2:4], 16)
+            b = int(hexstr[4:6], 16)
+            a = 200
+        return (r, g, b, a)
+
+    text_rgb = tuple(int(text_color_hex.strip('#')[i:i+2], 16) for i in (0, 2, 4))
+    cap_img = _render_caption_image(text, w - 2 * margin, margin, text_rgb)
+
+    bar_h = cap_img.height + 32
+    bg = Image.new("RGBA", (w, bar_h), hex_to_rgba(caption_bg_hex))
+    composed = Image.new("RGBA", (w, bar_h), (0, 0, 0, 0))
+    composed.alpha_composite(bg, (0, 0))
+    x = (w - cap_img.width) // 2
+    y = (bar_h - cap_img.height) // 2
+    composed.alpha_composite(cap_img, (x, y))
+
+    cap_clip = ImageClip(np.array(composed)).set_position((0, h - bar_h))
+    return CompositeVideoClip([cap_clip])
+
+
+def build_video(
+    scenes: List[SceneSpec],
+    out_path: str,
+    width: int,
+    height: int,
+    fps: int,
+    hook_text: Optional[str],
+    voice_path: Optional[str],
+    music_db: float,
+    voice_db: float,
+    text_color: str,
+    caption_bg: str,
+    margin: int,
+    seed: int = 42,
+) -> str:
+    rng = random.Random(seed)
+
+    vclips = []
+    for s in scenes:
+        kb = _ken_burns_clip(s.image_path, width, height, s.duration, rng)
+        cap = _caption_clip(s.text, width, height, margin, text_color, caption_bg).set_duration(s.duration)
+        vclips.append(CompositeVideoClip([kb, cap]).set_duration(s.duration))
+
+    video = concatenate_videoclips(vclips, method="compose").set_fps(fps)
+
+    audio_clips = []
+    if voice_path and os.path.exists(voice_path):
+        try:
+            voice = AudioFileClip(voice_path).volumex(10 ** (voice_db / 20.0))
+            audio_clips.append(voice)
+        except Exception:
+            pass
+
+    bg = _make_bg_tone(duration=video.duration, volume_db=music_db)
+    if bg is not None:
+        audio_clips.append(bg)
+
+    if audio_clips:
+        video = video.set_audio(CompositeAudioClip(audio_clips))
+
+    video.write_videofile(out_path, fps=fps, codec="libx264", audio_codec="aac", threads=4, preset="medium")
+    return out_path
