@@ -7,11 +7,11 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 from moviepy.editor import (
     AudioFileClip,
-    ColorClip,
     CompositeAudioClip,
     CompositeVideoClip,
     ImageClip,
     concatenate_videoclips,
+    concatenate_audioclips,
 )
 
 # Pillow >=10 removed Image.ANTIALIAS; alias to LANCZOS for moviepy compatibility
@@ -141,13 +141,14 @@ def build_video(
     height: int,
     fps: int,
     hook_text: Optional[str],
-    voice_path: Optional[str],
+    voice_paths: Optional[List[Optional[str]]],
     music_db: float,
     voice_db: float,
     text_color: str,
     caption_bg: str,
     margin: int,
     seed: int = 42,
+    crossfade_s: float = 0.35,
 ) -> str:
     rng = random.Random(seed)
 
@@ -157,22 +158,39 @@ def build_video(
         cap = _caption_clip(s.text, width, height, margin, text_color, caption_bg).set_duration(s.duration)
         vclips.append(CompositeVideoClip([kb, cap]).set_duration(s.duration))
 
-    video = concatenate_videoclips(vclips, method="compose").set_fps(fps)
+    # apply crossfades
+    vclips_cf = []
+    for idx, clip in enumerate(vclips):
+        if idx == 0:
+            vclips_cf.append(clip)
+        else:
+            vclips_cf.append(clip.crossfadein(crossfade_s))
 
-    audio_clips = []
-    if voice_path and os.path.exists(voice_path):
-        try:
-            voice = AudioFileClip(voice_path).volumex(10 ** (voice_db / 20.0))
-            audio_clips.append(voice)
-        except Exception:
-            pass
+    video = concatenate_videoclips(vclips_cf, method="compose", padding=-crossfade_s).set_fps(fps)
+
+    # Voice track concatenation
+    voice_track = None
+    if voice_paths:
+        voice_clips = []
+        for p in voice_paths:
+            if p and os.path.exists(p):
+                try:
+                    voice_clips.append(AudioFileClip(p).volumex(10 ** (voice_db / 20.0)))
+                except Exception:
+                    pass
+        if voice_clips:
+            voice_track = concatenate_audioclips(voice_clips)
 
     bg = _make_bg_tone(duration=video.duration, volume_db=music_db)
-    if bg is not None:
-        audio_clips.append(bg)
 
-    if audio_clips:
-        video = video.set_audio(CompositeAudioClip(audio_clips))
+    audio_layers = []
+    if voice_track is not None:
+        audio_layers.append(voice_track)
+    if bg is not None:
+        audio_layers.append(bg)
+
+    if audio_layers:
+        video = video.set_audio(CompositeAudioClip(audio_layers))
 
     video.write_videofile(out_path, fps=fps, codec="libx264", audio_codec="aac", threads=4, preset="medium")
     return out_path

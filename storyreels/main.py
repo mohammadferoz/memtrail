@@ -44,14 +44,14 @@ def main():
         target_scenes=cfg["story"]["target_scenes"],
     )
 
-    # 2) Scenes
-    total_duration = max(cfg["video"]["min_duration"], min(cfg["video"]["max_duration"], args.duration))
+    # 2) Scenes (initial durations)
+    target_total = max(cfg["video"]["min_duration"], min(cfg["video"]["max_duration"], args.duration))
     scenes = build_scenes(
         story_scenes=story.scenes,
         topic=args.topic,
         niche=args.niche,
         style_hint=cfg["images"]["style_hint"],
-        total_duration=total_duration,
+        total_duration=target_total,
     )
 
     # 3) Images
@@ -64,10 +64,23 @@ def main():
         else:
             frame_paths.append(generate_image(args.image_provider, sc.prompt, out_path, size=size))
 
-    # 4) TTS (optional)
-    full_text = story.hook + "\n" + "\n".join([s.text for s in scenes])
-    voice = synthesize(full_text, provider=args.tts_provider)
-    voice_path = voice.path if voice else None
+    # 4) Per-scene TTS (optional) and duration alignment
+    voice_paths = []
+    voice_durations = []
+    for sc in scenes:
+        vo = synthesize(sc.text, provider=args.tts_provider)
+        if vo:
+            voice_paths.append(vo.path)
+            voice_durations.append(max(1.8, vo.duration))
+        else:
+            voice_paths.append(None)
+            voice_durations.append(sc.duration)
+
+    # scale durations to match target_total
+    total_voice = sum(voice_durations) if voice_durations else target_total
+    scale = target_total / total_voice if total_voice > 0 else 1.0
+    for sc, d in zip(scenes, voice_durations):
+        sc.duration = max(1.8, d * scale)
 
     # 5) Video assembly
     scene_specs = [SceneSpec(image_path=fp, text=sc.text, duration=sc.duration) for fp, sc in zip(frame_paths, scenes)]
@@ -80,7 +93,7 @@ def main():
         height=cfg["video"]["height"],
         fps=cfg["video"]["fps"],
         hook_text=story.hook,
-        voice_path=voice_path,
+        voice_paths=voice_paths,
         music_db=cfg["video"]["music_db"],
         voice_db=cfg["video"]["voice_db"],
         text_color=cfg["video"]["text_color"],
