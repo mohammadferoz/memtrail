@@ -3,6 +3,8 @@ import yaml
 import argparse
 from dotenv import load_dotenv
 from tqdm import tqdm
+from PIL import Image
+import numpy as np
 
 from .utils import ensure_dir, slugify
 from .story_gen import generate_story
@@ -24,6 +26,14 @@ def parse_args():
     p.add_argument("--tts-provider", type=str, default=os.getenv("TTS_PROVIDER", "gtts"))
     p.add_argument("--dry-run", action="store_true")
     return p.parse_args()
+
+
+def _srt_timestamp(seconds: float) -> str:
+    h = int(seconds // 3600)
+    m = int((seconds % 3600) // 60)
+    s = int(seconds % 60)
+    ms = int((seconds - int(seconds)) * 1000)
+    return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
 
 
 def main():
@@ -101,7 +111,7 @@ def main():
         margin=cfg["video"]["margin"],
     )
 
-    # 6) Caption + hashtags
+    # 6) Caption + hashtags + SRT + thumbnail
     base_tags = cfg.get("hashtags", {}).get("base", [])
     extra_tags = [f"#{slugify(args.niche)}", f"#{slugify(args.style)}", "#fyp", "#reelsinstagram"]
     hashtags = sorted(set(base_tags + extra_tags))
@@ -111,9 +121,28 @@ def main():
     with open(os.path.join(args.outdir, "hashtags.txt"), "w") as f:
         f.write(" ".join(hashtags) + "\n")
 
+    # SRT subtitles
+    srt_path = os.path.join(args.outdir, f"{project_slug}.srt")
+    t = 0.0
+    with open(srt_path, "w") as f:
+        for i, sc in enumerate(scenes, start=1):
+            start = t
+            end = t + sc.duration
+            f.write(f"{i}\n")
+            f.write(f"{_srt_timestamp(start)} --> {_srt_timestamp(end)}\n")
+            f.write(sc.text.strip() + "\n\n")
+            t = end
+
+    # Thumbnail (cover)
+    thumb_path = os.path.join(args.outdir, f"{project_slug}_cover.png")
+    first = Image.open(frame_paths[0]).convert("RGB")
+    first.save(thumb_path)
+
     print("\nDone! Video:", out_video)
     print("Caption:", os.path.join(args.outdir, "captions.txt"))
     print("Hashtags:", os.path.join(args.outdir, "hashtags.txt"))
+    print("Subtitles:", srt_path)
+    print("Thumbnail:", thumb_path)
 
 
 if __name__ == "__main__":

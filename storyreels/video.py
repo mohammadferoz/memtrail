@@ -82,6 +82,28 @@ def _ken_burns_clip(image_path: str, w: int, h: int, duration: float, rng: rando
     return base.fl(fl, apply_to=["mask"]).set_duration(duration)
 
 
+def _render_text_image(text: str, w: int, font_size: int, color: Tuple[int, int, int]) -> Image.Image:
+    try:
+        font = ImageFont.truetype("DejaVuSans-Bold.ttf", font_size)
+    except Exception:
+        font = ImageFont.load_default()
+    lines = split_text_for_caption(text, max_chars=20)
+    height = len(lines) * int(font_size * 1.2) + 20
+    img = Image.new("RGBA", (w, height), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+    y = 10
+    for ln in lines:
+        ln_w = int(draw.textlength(ln, font=font))
+        x = (w - ln_w) // 2
+        draw.text((x+3, y+3), ln, font=font, fill=(0,0,0,180))
+        draw.text((x-3, y+3), ln, font=font, fill=(0,0,0,180))
+        draw.text((x+3, y-3), ln, font=font, fill=(0,0,0,180))
+        draw.text((x-3, y-3), ln, font=font, fill=(0,0,0,180))
+        draw.text((x, y), ln, font=font, fill=color + (255,))
+        y += int(font_size * 1.2)
+    return img
+
+
 def _render_caption_image(text: str, w: int, margin: int, text_color: Tuple[int, int, int]) -> Image.Image:
     try:
         font = ImageFont.truetype("DejaVuSans-Bold.ttf", 54)
@@ -149,14 +171,24 @@ def build_video(
     margin: int,
     seed: int = 42,
     crossfade_s: float = 0.35,
+    hook_seconds: float = 2.0,
 ) -> str:
     rng = random.Random(seed)
 
     vclips = []
-    for s in scenes:
+    for idx_s, s in enumerate(scenes):
         kb = _ken_burns_clip(s.image_path, width, height, s.duration, rng)
+        overlays = [kb]
+        # hook overlay only on first scene
+        if idx_s == 0 and hook_text:
+            text_rgb = tuple(int(text_color.strip('#')[i:i+2], 16) for i in (0, 2, 4))
+            hook_img = _render_text_image(hook_text, w=width - 2 * margin, font_size=96, color=text_rgb)
+            hook_clip = ImageClip(np.array(hook_img)).set_position(("center", "center"))
+            hook_clip = hook_clip.set_duration(min(hook_seconds, s.duration)).crossfadeout(0.4)
+            overlays.append(hook_clip)
         cap = _caption_clip(s.text, width, height, margin, text_color, caption_bg).set_duration(s.duration)
-        vclips.append(CompositeVideoClip([kb, cap]).set_duration(s.duration))
+        overlays.append(cap)
+        vclips.append(CompositeVideoClip(overlays).set_duration(s.duration))
 
     # apply crossfades
     vclips_cf = []
